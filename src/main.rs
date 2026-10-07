@@ -12,13 +12,15 @@ mod ui;
 mod youtube;
 
 use std::io::stdout;
+use std::sync::Arc;
 
 use clap::Parser;
 use crossterm::execute;
 use crossterm::terminal::disable_raw_mode;
 
-use app::AppState;
+use app::App;
 use config::AppConfig;
+use youtube::RustyYtdlClient;
 
 /// Terminal YouTube music player (foundation).
 #[derive(Parser, Debug)]
@@ -64,16 +66,11 @@ async fn main() -> Result<(), errors::RmusixError> {
         }
     });
 
-    let state = AppState::new(cli.query.clone());
+    let state_query = cli.query.clone();
 
-    if let Some(q) = state.initial_query.as_deref() {
-        println!("initial search: {q}");
-    }
-    println!(
-        "config: volume={:.2} limit={} quality={:?}",
-        config.volume, config.search_limit, config.quality
-    );
-    println!("foundation OK");
+    let youtube = Arc::new(RustyYtdlClient::new());
+    let app = App::new(config, youtube, state_query);
+    app.run().await?;
 
     Ok(())
 }

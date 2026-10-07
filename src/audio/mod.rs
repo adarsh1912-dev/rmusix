@@ -1,9 +1,4 @@
-//! Audio stub.
-//!
-//! scrape-only, replaceable, no binaries.
-//!
-//! Playback must be pure-Rust (`rodio` + `symphonia`), fed by URLs resolved
-//! via the scrape-only YouTube client. No `ffmpeg` / `mpv` subprocesses.
+//! Audio engine (rodio + symphonia, scrape-only, no subprocesses).
 
 use crate::models::AudioStreamInfo;
 use std::time::Duration;
@@ -31,3 +26,8 @@ pub enum AudioEvent {
     Buffering(bool),
     Error(String),
 }
+
+pub mod controls;
+pub mod player;
+
+pub use player::AudioEngine;
