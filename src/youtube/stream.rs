@@ -1,6 +1,10 @@
-//! Audio-only format picking for resolved streams.
+//! Audio format picking with progressive fallback for resolved streams.
 //!
 //! Pure selection over `rusty_ytdl` formats; no files, no subprocesses.
+//!
+//! Tier order (first non-empty tier wins): audio-only direct, audio-only any,
+//! muxed progressive direct (video+audio in one URL — rodio/symphonia demuxes
+//! the audio fine), then anything carrying audio (incl. HLS/DASH/live).
 
 use crate::errors::RmusixError;
 use crate::models::{AudioQuality, AudioStreamInfo};
@@ -25,36 +29,57 @@ fn is_any_audio_only(format: &rusty_ytdl::VideoFormat) -> bool {
     format.has_audio && !format.has_video && !format.url.trim().is_empty()
 }
 
-/// Pick an audio-only format for `quality`; `None` when no candidate exists.
+/// True for direct muxed (progressive) candidates: audio+video in one URL,
+/// excluding HLS/DASH/live manifests. Decodes audio fine via rodio.
+fn is_muxed_direct(format: &rusty_ytdl::VideoFormat) -> bool {
+    format.has_audio
+        && !format.url.trim().is_empty()
+        && !format.is_hls
+        && !format.is_dash_mpd
+        && !format.is_live
+}
+
+/// Last resort: anything carrying audio with a usable URL (incl. HLS/DASH/live).
+fn is_any_with_audio(format: &rusty_ytdl::VideoFormat) -> bool {
+    format.has_audio && !format.url.trim().is_empty()
+}
+
+/// Pick a playable format for `quality`; `None` only when nothing carries audio.
 ///
-/// - `Low` → lowest effective bitrate
-/// - `High` → highest effective bitrate
-/// - `Medium` → median effective bitrate (upper-middle on even counts)
-///
-/// Prefers direct (non-HLS/DASH/live) audio; falls back to any audio-only
-/// URL when no direct candidate exists. Never panics.
+/// Tiers (first non-empty wins), then Low/Med/High by effective bitrate:
+/// T1 audio-only direct, T2 audio-only any, T3 muxed progressive direct,
+/// T4 any-with-audio. Never panics; blank URLs excluded everywhere.
 pub fn pick_audio_format(
     formats: &[rusty_ytdl::VideoFormat],
     quality: AudioQuality,
 ) -> Option<rusty_ytdl::VideoFormat> {
-    let mut direct: Vec<&rusty_ytdl::VideoFormat> =
+    let mut tier: Vec<&rusty_ytdl::VideoFormat> =
         formats.iter().filter(|f| is_direct_audio_only(f)).collect();
-    if direct.is_empty() {
-        direct = formats.iter().filter(|f| is_any_audio_only(f)).collect();
+    if tier.is_empty() {
+        tier = formats.iter().filter(|f| is_any_audio_only(f)).collect();
     }
-    if direct.is_empty() {
+    if tier.is_empty() {
+        tier = formats.iter().filter(|f| is_muxed_direct(f)).collect();
+    }
+    if tier.is_empty() {
+        tier = formats.iter().filter(|f| is_any_with_audio(f)).collect();
+    }
+    if tier.is_empty() {
         return None;
     }
-    direct.sort_by_key(|f| effective_bitrate(f));
+    tier.sort_by_key(|f| effective_bitrate(f));
     let index = match quality {
         AudioQuality::Low => 0,
-        AudioQuality::High => direct.len().saturating_sub(1),
-        AudioQuality::Medium => direct.len() / 2,
+        AudioQuality::High => tier.len().saturating_sub(1),
+        AudioQuality::Medium => tier.len() / 2,
     };
-    direct.get(index).map(|f| (*f).clone())
+    tier.get(index).map(|f| (*f).clone())
 }
 
 /// Build [`AudioStreamInfo`] from a chosen format; errors on blank URLs.
+///
+/// Any mime is accepted: progressive (muxed) formats carry a `video/*` mime
+/// but demux/decode to audio fine via rodio/symphonia.
 pub fn audio_info_from_format(
     format: &rusty_ytdl::VideoFormat,
 ) -> Result<AudioStreamInfo, RmusixError> {
@@ -72,15 +97,27 @@ pub fn audio_info_from_format(
     })
 }
 
-/// Pick + convert in one step; errors when no audio-only format exists.
+/// Pick + convert in one step; errors with tier counts when nothing playable.
 pub fn select_audio_stream(
     formats: &[rusty_ytdl::VideoFormat],
     quality: AudioQuality,
 ) -> Result<AudioStreamInfo, RmusixError> {
-    let chosen = pick_audio_format(formats, quality).ok_or_else(|| {
-        RmusixError::StreamResolution("no audio-only formats available".to_string())
-    })?;
-    audio_info_from_format(&chosen)
+    if let Some(chosen) = pick_audio_format(formats, quality) {
+        return audio_info_from_format(&chosen);
+    }
+    let total = formats.len();
+    let audio_only = formats
+        .iter()
+        .filter(|f| f.has_audio && !f.has_video && !f.url.trim().is_empty())
+        .count();
+    let muxed = formats
+        .iter()
+        .filter(|f| f.has_audio && f.has_video && !f.url.trim().is_empty())
+        .count();
+    Err(RmusixError::StreamResolution(format!(
+        "no playable audio formats: {total} formats checked \
+         (audio_only={audio_only}, muxed={muxed}) for quality={quality:?}"
+    )))
 }
 
 fn mime_string(format: &rusty_ytdl::VideoFormat) -> String {
@@ -127,6 +164,36 @@ mod tests {
         serde_json::from_value(value).expect("fixture must deserialize")
     }
 
+    fn muxed_format(bitrate: u64, url: &str) -> rusty_ytdl::VideoFormat {
+        let value = json!({
+            "itag": 18,
+            "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+            "bitrate": bitrate,
+            "url": url,
+            "hasVideo": true,
+            "hasAudio": true,
+            "isLive": false,
+            "isHLS": false,
+            "isDashMPD": false
+        });
+        serde_json::from_value(value).expect("fixture must deserialize")
+    }
+
+    fn muxed_hls_format(bitrate: u64, url: &str) -> rusty_ytdl::VideoFormat {
+        let value = json!({
+            "itag": 96,
+            "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+            "bitrate": bitrate,
+            "url": url,
+            "hasVideo": true,
+            "hasAudio": true,
+            "isLive": true,
+            "isHLS": true,
+            "isDashMPD": false
+        });
+        serde_json::from_value(value).expect("fixture must deserialize")
+    }
+
     #[test]
     fn picker_low_medium_high() {
         let formats = vec![
@@ -155,9 +222,17 @@ mod tests {
 
     #[test]
     fn picker_empty_is_none() {
+        // None only when zero formats carry audio at all.
         assert!(pick_audio_format(&[], AudioQuality::High).is_none());
         assert!(pick_audio_format(&[video_only_format()], AudioQuality::Low).is_none());
         assert!(select_audio_stream(&[], AudioQuality::Medium).is_err());
+        assert!(
+            pick_audio_format(
+                &[muxed_format(500_000, "https://example.com/muxed")],
+                AudioQuality::Low
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -180,5 +255,58 @@ mod tests {
         // Sorted ascending; index len/2 = 2 → third element.
         let med = pick_audio_format(&formats, AudioQuality::Medium).expect("med");
         assert_eq!(med.url, "https://example.com/c");
+    }
+
+    #[test]
+    fn muxed_progressive_picked_when_no_audio_only() {
+        let formats = vec![
+            video_only_format(),
+            muxed_format(500_000, "https://example.com/muxed"),
+        ];
+        let picked = pick_audio_format(&formats, AudioQuality::High).expect("muxed fallback");
+        assert_eq!(picked.url, "https://example.com/muxed");
+        let info = select_audio_stream(&formats, AudioQuality::Medium).expect("resolves");
+        assert_eq!(info.url, "https://example.com/muxed");
+    }
+
+    #[test]
+    fn direct_audio_preferred_over_muxed() {
+        let formats = vec![
+            muxed_format(5_000_000, "https://example.com/muxed-huge"),
+            test_format(96_000, "https://example.com/audio"),
+        ];
+        // T1 tier wins despite the muxed URL having the higher bitrate.
+        for quality in [AudioQuality::Low, AudioQuality::Medium, AudioQuality::High] {
+            let picked = pick_audio_format(&formats, quality).expect("audio");
+            assert_eq!(picked.url, "https://example.com/audio");
+        }
+    }
+
+    #[test]
+    fn live_hls_with_audio_picked_as_last_resort() {
+        let formats = vec![muxed_hls_format(300_000, "https://example.com/live-muxed")];
+        let picked = pick_audio_format(&formats, AudioQuality::Low).expect("last resort");
+        assert_eq!(picked.url, "https://example.com/live-muxed");
+    }
+
+    #[test]
+    fn empty_error_carries_counts() {
+        let err = select_audio_stream(&[], AudioQuality::Medium).expect_err("empty must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("no playable audio formats"), "got {msg}");
+        assert!(msg.contains("0 formats checked"), "got {msg}");
+        let err = select_audio_stream(&[video_only_format()], AudioQuality::High)
+            .expect_err("video-only must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("1 formats checked"), "got {msg}");
+        assert!(msg.contains("audio_only=0"), "got {msg}");
+    }
+
+    #[test]
+    fn video_mp4_mime_accepted() {
+        let format = muxed_format(500_000, "https://example.com/muxed");
+        let info = audio_info_from_format(&format).expect("progressive mime accepted");
+        assert_eq!(info.url, "https://example.com/muxed");
+        assert!(info.mime.contains("video/"), "mime was {}", info.mime);
     }
 }
