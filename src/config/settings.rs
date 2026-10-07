@@ -151,4 +151,18 @@ mod tests {
             std::env::remove_var("RMUSIX_MPV");
         }
     }
+
+    #[test]
+    fn missing_bins_surface_config_errors() {
+        // Startup check (Glue): nonexistent binaries must surface as
+        // `Config` errors with install hints so `main` can exit 2 before
+        // entering the TUI.
+        let mut cfg = AppConfig::default();
+        cfg.ytdlp_path = "/nonexistent/yt-dlp-xyz".into();
+        cfg.mpv_path = "/nonexistent-mpv-xyz".into();
+        let e = cfg.resolve_ytdlp().expect_err("missing yt-dlp must fail");
+        assert!(e.to_string().contains("yt-dlp not found"), "got {e}");
+        let e = cfg.resolve_mpv().expect_err("missing mpv must fail");
+        assert!(e.to_string().contains("mpv not found"), "got {e}");
+    }
 }

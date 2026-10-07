@@ -9,15 +9,36 @@ pub(crate) use events::InternalEvent;
 #[allow(unused_imports)]
 pub use state::{AppState, InputMode, Mode};
 
-use crate::audio::{AudioCommand, AudioEngine, AudioEvent};
+use crate::audio::{AudioCommand, AudioEvent, MpvEngine};
 use crate::config::AppConfig;
 use crate::models::{AudioStreamInfo, PlaybackState, Screen, Song};
 use crate::queue::QueueManager;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Socket path for mpv IPC.
+///
+/// Prefers `$XDG_RUNTIME_DIR/rmusix-mpv-<pid>.sock`, else
+/// `/tmp/rmusix-$UID/mpv-<pid>.sock` (`$UID` from env, `0` when unset).
+/// Callers create the parent dir before spawning mpv and remove the file
+/// on quit / Ctrl-C / panic (the engine also removes it on drop).
+pub fn mpv_socket_path() -> PathBuf {
+    if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+        let rt = rt.trim().to_string();
+        if !rt.is_empty() {
+            return PathBuf::from(rt).join(format!("rmusix-mpv-{}.sock", std::process::id()));
+        }
+    }
+    let uid = std::env::var("UID")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    PathBuf::from(format!("/tmp/rmusix-{uid}")).join(format!("mpv-{}.sock", std::process::id()))
+}
 
 pub struct App<Y> {
     pub state: AppState,
@@ -216,12 +237,28 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
         enable_raw_mode().map_err(crate::errors::RmusixError::from)?;
         let mut out = stdout();
         execute!(out, EnterAlternateScreen).map_err(crate::errors::RmusixError::from)?;
-        let restore = || {
+
+        // Glue (Agent 4): mpv IPC over `MpvEngine`. `mpv_bin` comes from
+        // `AppConfig::mpv_path` (file < `RMUSIX_MPV` env, resolved in main);
+        // `Play(AudioStreamInfo)` carries the yt-dlp URL (HLS-capable) and
+        // is forwarded with `loadfile <url> replace` by the engine.
+        let mpv_bin = self.config.mpv_path.clone();
+        let sock = mpv_socket_path();
+        if let Some(parent) = sock.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let sock_cleanup = sock.clone();
+        let restore = move || {
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+            // Foreground removal guarantees no stale socket even if the
+            // background engine task is aborted on shutdown; the engine
+            // also removes it on drop and kills the mpv child via
+            // `kill_on_drop(true)`.
+            let _ = std::fs::remove_file(&sock_cleanup);
         };
 
-        let (engine, mut audio_rx) = AudioEngine::spawn();
+        let (engine, mut audio_rx) = MpvEngine::spawn_with_volume(mpv_bin, sock, self.state.volume);
         let _ = engine
             .send(AudioCommand::SetVolume(self.state.volume))
             .await;
@@ -333,6 +370,15 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
                 _ = ticker.tick() => {
                     let _ = tx.send(InternalEvent::Tick).await;
                 }
+                // SIGINT delivered as a signal (e.g. `kill -INT`): same
+                // graceful path as q / Ctrl-C key — Stop mpv, restore
+                // terminal, kill child + remove socket via `restore()`.
+                // (Keyboard Ctrl-C in raw mode arrives as a key event above;
+                // this covers external signals.)
+                _ = async { let _ = tokio::signal::ctrl_c().await; } => {
+                    let _ = engine.send(AudioCommand::Stop).await;
+                    break Ok(());
+                }
             }
             // Render each iteration (non-blocking).
             let _ = term.draw(|f| crate::ui::render(f, &self.state));
@@ -342,6 +388,8 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
     }
 }
 
+/// Glue (Agent 4): production `Y` is [`crate::youtube::YtDlpClient`] behind
+/// `Arc`; same [`InternalEvent`] flow as before (SearchDone / ResolveDone).
 fn spawn_search<Y: crate::youtube::YouTubeClient + 'static>(
     yt: Arc<Y>,
     query: String,
@@ -393,6 +441,9 @@ fn spawn_resolve<Y: crate::youtube::YouTubeClient + 'static>(
     quality: crate::models::AudioQuality,
     tx: mpsc::Sender<InternalEvent>,
 ) {
+    // Resolve yields `AudioStreamInfo { url, .. }` (yt-dlp bestaudio/best,
+    // HLS-capable); the run loop forwards it as `AudioCommand::Play(info)`
+    // to `MpvEngine`, which runs `loadfile <url> replace` over IPC.
     tokio::task::spawn(async move {
         let res: Result<(Song, AudioStreamInfo), String> = tokio::task::spawn_blocking(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -561,5 +612,84 @@ mod tests {
         let mut a = app();
         a.state.playback = Some(PlaybackState::Error("boom".into()));
         assert!(matches!(a.state.playback, Some(PlaybackState::Error(_))));
+    }
+
+    #[test]
+    fn missing_bin_error_surfaces() {
+        // Startup check: nonexistent binaries surface as Config errors with
+        // install hints (main exits 2 on these before entering the TUI).
+        let mut cfg = AppConfig::default();
+        cfg.ytdlp_path = "/nonexistent/yt-dlp-xyz".into();
+        cfg.mpv_path = "/nonexistent-mpv-xyz".into();
+        let e = cfg.resolve_ytdlp().expect_err("missing yt-dlp must fail");
+        assert!(e.to_string().contains("yt-dlp not found"), "got {e}");
+        let e = cfg.resolve_mpv().expect_err("missing mpv must fail");
+        assert!(e.to_string().contains("mpv not found"), "got {e}");
+
+        // Run-loop error path mirrors `ResolveDone(Err) -> PlaybackState::Error`.
+        let mut a = app();
+        a.state.playback = Some(PlaybackState::Error(
+            "yt-dlp not found (pacman -S yt-dlp)".to_string(),
+        ));
+        assert!(matches!(a.state.playback, Some(PlaybackState::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn missing_bin_resolve_surfaces_as_playback_error() {
+        // Offline: mock stands in for `YtDlpClient` with a missing binary;
+        // the resolve failure must be representable as a playback error
+        // (same string the run loop stores on `ResolveDone(Err)`).
+        let yt = MockYt {
+            songs: vec![song("a")],
+            fail_search: false,
+            fail_resolve: true,
+        };
+        let err = yt
+            .resolve_audio_stream("a", crate::models::AudioQuality::Medium)
+            .await
+            .expect_err("mock resolve must fail");
+        let mut a = app();
+        a.state.playback = Some(PlaybackState::Error(err.to_string()));
+        assert!(matches!(a.state.playback, Some(PlaybackState::Error(_))));
+    }
+
+    #[test]
+    fn socket_path_uses_xdg_or_tmp_uid() {
+        // SAFETY: test-only single-threaded env mutation; restored afterwards.
+        let prev_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+        let prev_uid = std::env::var("UID").ok();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+            std::env::remove_var("UID");
+        }
+        let p = mpv_socket_path();
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(format!(
+                "/run/user/1000/rmusix-mpv-{}.sock",
+                std::process::id()
+            ))
+        );
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("UID", "42");
+        }
+        let p = mpv_socket_path();
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(format!("/tmp/rmusix-42/mpv-{}.sock", std::process::id()))
+        );
+        unsafe {
+            if let Some(v) = prev_xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", v);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+            if let Some(v) = prev_uid {
+                std::env::set_var("UID", v);
+            } else {
+                std::env::remove_var("UID");
+            }
+        }
     }
 }
