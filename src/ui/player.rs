@@ -24,7 +24,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         String::new()
     };
-    let text = format!("{icon} {title}{pos}  {vol}{spin}");
+    let text = if let Some(crate::models::PlaybackState::Error(e)) = &state.playback {
+        format!("Error: {e}")
+    } else {
+        format!("{icon} {title}{pos}  {vol}{spin}")
+    };
     let p = Paragraph::new(text).style(Style::default().fg(Color::Yellow));
     frame.render_widget(p.block(Block::default().borders(Borders::ALL)), area);
 }

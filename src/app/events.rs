@@ -13,6 +13,8 @@ pub enum AppEvent {
     SearchBackspace,
     SearchSubmit,
     PlaySelected,
+    SelectUp,
+    SelectDown,
     TogglePlayPause,
     EnqueueSelected,
     Next,

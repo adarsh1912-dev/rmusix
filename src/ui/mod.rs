@@ -27,6 +27,9 @@ pub fn key_to_action(key: KeyEvent, state: &AppState) -> AppEvent {
             KeyCode::Esc => return AppEvent::ExitSearchMode,
             KeyCode::Enter => return AppEvent::SearchSubmit,
             KeyCode::Backspace => return AppEvent::SearchBackspace,
+            // In Search-input mode chars are input; only Up/Down move selection.
+            KeyCode::Up => return AppEvent::SelectUp,
+            KeyCode::Down => return AppEvent::SelectDown,
             KeyCode::Char(c) => {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT)
@@ -48,6 +51,10 @@ pub fn key_to_action(key: KeyEvent, state: &AppState) -> AppEvent {
         KeyCode::Char('p') => AppEvent::Prev,
         KeyCode::Left => AppEvent::SeekBackward,
         KeyCode::Right => AppEvent::SeekForward,
+        // j/k + arrows move selection. Ctrl-n/p avoided: they clash with
+        // terminal flow control / are unreliable over crossterm; plain j/k used.
+        KeyCode::Up | KeyCode::Char('k') => AppEvent::SelectUp,
+        KeyCode::Down | KeyCode::Char('j') => AppEvent::SelectDown,
         KeyCode::Char('+') | KeyCode::Char('=') => AppEvent::VolumeUp,
         KeyCode::Char('-') | KeyCode::Char('_') => AppEvent::VolumeDown,
         KeyCode::Char('m') => AppEvent::ToggleMute,
@@ -128,6 +135,32 @@ mod tests {
     }
 
     #[test]
+    fn select_keys() {
+        let s = AppState::default();
+        assert_eq!(key_to_action(key(KeyCode::Up), &s), AppEvent::SelectUp);
+        assert_eq!(key_to_action(key(KeyCode::Down), &s), AppEvent::SelectDown);
+        assert_eq!(
+            key_to_action(key(KeyCode::Char('k')), &s),
+            AppEvent::SelectUp
+        );
+        assert_eq!(
+            key_to_action(key(KeyCode::Char('j')), &s),
+            AppEvent::SelectDown
+        );
+        // Search-input mode: Up/Down move, chars stay input.
+        let si = AppState {
+            mode: Mode::Search,
+            ..AppState::default()
+        };
+        assert_eq!(key_to_action(key(KeyCode::Up), &si), AppEvent::SelectUp);
+        assert_eq!(key_to_action(key(KeyCode::Down), &si), AppEvent::SelectDown);
+        assert_eq!(
+            key_to_action(key(KeyCode::Char('j')), &si),
+            AppEvent::SearchInput('j')
+        );
+    }
+
+    #[test]
     fn error_state_shows_error() {
         let s = AppState {
             search_error: Some("boom".into()),
@@ -135,6 +168,17 @@ mod tests {
         };
         let out = snapshot(&s);
         assert!(out.contains("boom"));
+    }
+
+    #[test]
+    fn error_playback_shows_in_player() {
+        use crate::models::PlaybackState;
+        let s = AppState {
+            playback: Some(PlaybackState::Error("no stream".into())),
+            ..AppState::default()
+        };
+        let out = snapshot(&s);
+        assert!(out.contains("no stream"));
     }
 
     #[test]

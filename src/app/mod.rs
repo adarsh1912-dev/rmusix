@@ -85,6 +85,45 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
                 }
                 None
             }
+            // Selection moves use clamp (no wrap) to keep `>` predictable.
+            AppEvent::SelectUp => {
+                match self.state.current_screen() {
+                    Screen::Search => {
+                        if !self.state.results.is_empty() {
+                            self.state.selected = self.state.selected.saturating_sub(1);
+                        }
+                    }
+                    Screen::Queue => {
+                        if !self.queue.is_empty() {
+                            let cur = self.queue.index().unwrap_or(0);
+                            self.queue.play_at(cur.saturating_sub(1));
+                            self.sync_queue();
+                        }
+                    }
+                    Screen::Help => {}
+                }
+                None
+            }
+            AppEvent::SelectDown => {
+                match self.state.current_screen() {
+                    Screen::Search => {
+                        if !self.state.results.is_empty() {
+                            let max = self.state.results.len() - 1;
+                            self.state.selected = (self.state.selected + 1).min(max);
+                        }
+                    }
+                    Screen::Queue => {
+                        if !self.queue.is_empty() {
+                            let cur = self.queue.index().unwrap_or(0);
+                            let max = self.queue.len() - 1;
+                            self.queue.play_at((cur + 1).min(max));
+                            self.sync_queue();
+                        }
+                    }
+                    Screen::Help => {}
+                }
+                None
+            }
             AppEvent::TogglePlayPause => {
                 if self.state.playing() {
                     self.state.playback = Some(PlaybackState::Paused);
@@ -474,6 +513,47 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn select_clamps_and_empty_no_panic() {
+        let mut a = app();
+        // Empty: no panic, stays 0.
+        a.state.results = vec![];
+        a.handle(AppEvent::SelectUp);
+        a.handle(AppEvent::SelectDown);
+        assert_eq!(a.state.selected, 0);
+        // Clamp at bounds.
+        a.state.results = vec![song("a"), song("b"), song("c")];
+        a.state.selected = 0;
+        a.handle(AppEvent::SelectUp);
+        assert_eq!(a.state.selected, 0);
+        a.state.selected = 2;
+        a.handle(AppEvent::SelectDown);
+        assert_eq!(a.state.selected, 2);
+        a.state.selected = 1;
+        a.handle(AppEvent::SelectDown);
+        assert_eq!(a.state.selected, 2);
+        a.handle(AppEvent::SelectUp);
+        assert_eq!(a.state.selected, 1);
+    }
+
+    #[test]
+    fn select_queue_mirror_moves() {
+        let mut a = app();
+        a.state.results = vec![song("a"), song("b")];
+        a.state.screen = Some(Screen::Queue);
+        a.handle(AppEvent::EnqueueSelected); // selected=0 -> queue [a]
+        a.state.selected = 1;
+        a.handle(AppEvent::EnqueueSelected); // queue [a,b], index=0
+        a.handle(AppEvent::SelectDown);
+        assert_eq!(a.state.queue_selected, 1);
+        assert_eq!(a.queue().index(), Some(1));
+        a.handle(AppEvent::SelectDown); // clamp
+        assert_eq!(a.state.queue_selected, 1);
+        a.handle(AppEvent::SelectUp);
+        assert_eq!(a.state.queue_selected, 0);
+        assert_eq!(a.queue().index(), Some(0));
     }
 
     #[test]
