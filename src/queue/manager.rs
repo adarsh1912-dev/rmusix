@@ -28,6 +28,9 @@ impl QueueManager {
     }
 
     /// Advance to next song, returning it.
+    // Glue (Agent 5): intentionally not `Iterator::next` (takes &mut self and
+    // returns borrowed item); silence clippy without renaming public API.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&Song> {
         let nxt = match self.index {
             None => 0,

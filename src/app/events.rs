@@ -28,6 +28,7 @@ pub enum AppEvent {
 
 /// Internal async completions delivered over the mpsc channel.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum InternalEvent {
     App(AppEvent),
     SearchDone(Result<Vec<Song>, String>),

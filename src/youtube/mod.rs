@@ -14,6 +14,9 @@ use crate::errors::RmusixError;
 use crate::models::{AudioQuality, AudioStreamInfo, Song};
 
 /// Scrape-only YouTube source. Replaceable for tests/mocks.
+// Glue (Agent 5): allow async-fn-in-trait so `cargo clippy -D warnings` stays
+// green without rewriting src/ logic.
+#[allow(async_fn_in_trait)]
 pub trait YouTubeClient: Send + Sync {
     /// Search YouTube for `query`, returning up to `limit` songs.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<Song>, RmusixError>;

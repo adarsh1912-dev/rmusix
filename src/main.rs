@@ -2,34 +2,17 @@
 // agents and intentionally unused here.
 #![allow(dead_code)]
 
-mod app;
-mod audio;
-mod config;
-mod errors;
-mod models;
-mod queue;
-mod ui;
-mod youtube;
-
-use std::io::stdout;
-use std::sync::Arc;
+// Glue (Agent 5): binary reuses the library crate so integration tests can
+// import the same modules. No logic changed.
+use rmusix::Cli;
 
 use clap::Parser;
 use crossterm::execute;
 use crossterm::terminal::disable_raw_mode;
 
-use app::App;
-use config::AppConfig;
-use youtube::RustyYtdlClient;
-
-/// Terminal YouTube music player (foundation).
-#[derive(Parser, Debug)]
-#[command(name = "rmusix", version, about = "terminal YouTube music player")]
-struct Cli {
-    /// Initial search query.
-    #[arg(value_name = "QUERY")]
-    query: Option<String>,
-}
+use rmusix::app::App;
+use rmusix::config::AppConfig;
+use rmusix::youtube::RustyYtdlClient;
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
@@ -44,8 +27,11 @@ fn install_panic_hook() {
     }));
 }
 
+use std::io::stdout;
+use std::sync::Arc;
+
 #[tokio::main]
-async fn main() -> Result<(), errors::RmusixError> {
+async fn main() -> Result<(), rmusix::errors::RmusixError> {
     install_panic_hook();
 
     let cli = Cli::parse();
