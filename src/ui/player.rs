@@ -8,7 +8,15 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let icon = if state.playing() { "⏸" } else { "▶" };
+    let (icon, spinning) = match &state.playback {
+        Some(crate::models::PlaybackState::Playing) => ("⏸", false),
+        Some(crate::models::PlaybackState::Paused) => ("▶", false),
+        Some(crate::models::PlaybackState::Loading)
+        | Some(crate::models::PlaybackState::Buffering) => ("⟳", true),
+        Some(crate::models::PlaybackState::Stopped) => ("■", false),
+        Some(crate::models::PlaybackState::Error(_)) => ("✖", false),
+        None => ("▶", false),
+    };
     let title = state.current_title.as_deref().unwrap_or("—");
     let pos = match state.total {
         Some(t) => format!(" {}/{}", fmt_duration(state.position), fmt_duration(t)),
@@ -19,7 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         format!("Vol {}%", (state.volume * 100.0).round() as u32)
     };
-    let spin = if state.is_searching {
+    let spin = if state.is_searching || spinning {
         format!(" {}", SPINNER[state.spinner_frame % SPINNER.len()])
     } else {
         String::new()

@@ -23,6 +23,9 @@ pub enum AudioEvent {
     Duration(Option<Duration>),
     Finished,
     Buffering(bool),
+    /// mpv `pause` property changed (true = paused). Keeps UI in sync when
+    /// mpv initiates the change (e.g. pause-at-EOF, external IPC client).
+    Paused(bool),
     Error(String),
 }
 

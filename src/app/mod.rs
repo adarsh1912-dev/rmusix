@@ -152,6 +152,22 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
                 } else if matches!(self.state.playback, Some(PlaybackState::Paused)) {
                     self.state.playback = Some(PlaybackState::Playing);
                     Some(AudioCommand::Resume)
+                } else if matches!(
+                    self.state.playback,
+                    Some(PlaybackState::Loading) | Some(PlaybackState::Buffering)
+                ) {
+                    // Space during resolve/buffer: mpv keeps pause across
+                    // loadfile, so pausing now applies to the incoming track
+                    // instead of silently doing nothing.
+                    self.state.playback = Some(PlaybackState::Paused);
+                    Some(AudioCommand::Pause)
+                } else if matches!(self.state.playback, Some(PlaybackState::Stopped))
+                    && self.current_queued().is_some()
+                {
+                    // Space from Stopped with a queued track (re)starts it.
+                    // No command here: the run loop spawns resolve below.
+                    self.state.playback = Some(PlaybackState::Loading);
+                    None
                 } else {
                     None
                 }
@@ -297,7 +313,12 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
                                 break Ok(());
                             }
                             let needs_search = matches!(action, AppEvent::SearchSubmit);
-                            let needs_resolve = matches!(action, AppEvent::PlaySelected | AppEvent::Next | AppEvent::Prev);
+                            // Space-from-Stopped sets Loading with no command;
+                            // it still needs a resolve like an explicit play.
+                            let needs_resolve = matches!(action, AppEvent::PlaySelected | AppEvent::Next | AppEvent::Prev)
+                                || (matches!(action, AppEvent::TogglePlayPause)
+                                    && self.state.playback == Some(PlaybackState::Loading)
+                                    && self.current_queued().is_some());
                             if let Some(cmd) = self.handle(action) {
                                 let _ = engine.send(cmd).await;
                             }
@@ -348,6 +369,17 @@ impl<Y: crate::youtube::YouTubeClient + 'static> App<Y> {
                             AudioEvent::Duration(d) => self.state.total = d,
                             AudioEvent::Buffering(true) => self.state.playback = Some(PlaybackState::Buffering),
                             AudioEvent::Buffering(false) => {}
+                            AudioEvent::Paused(paused) => {
+                                // Authoritative mpv state: adopt it unless we
+                                // are mid-resolve (Loading wins until ResolveDone).
+                                if !matches!(self.state.playback, Some(PlaybackState::Loading)) {
+                                    self.state.playback = Some(if paused {
+                                        PlaybackState::Paused
+                                    } else {
+                                        PlaybackState::Playing
+                                    });
+                                }
+                            }
                             AudioEvent::Finished => {
                                 // Auto-next while playing: advance in queue and resolve.
                                 if let Some(_cmd) = self.advance(1) {}
@@ -612,6 +644,45 @@ mod tests {
         let mut a = app();
         a.state.playback = Some(PlaybackState::Error("boom".into()));
         assert!(matches!(a.state.playback, Some(PlaybackState::Error(_))));
+    }
+
+    #[test]
+    fn toggle_pause_resume_cycle() {
+        let mut a = app();
+        a.state.playback = Some(PlaybackState::Playing);
+        let cmd = a.handle(AppEvent::TogglePlayPause);
+        assert!(matches!(cmd, Some(AudioCommand::Pause)));
+        assert_eq!(a.state.playback, Some(PlaybackState::Paused));
+        let cmd = a.handle(AppEvent::TogglePlayPause);
+        assert!(matches!(cmd, Some(AudioCommand::Resume)));
+        assert_eq!(a.state.playback, Some(PlaybackState::Playing));
+    }
+
+    #[test]
+    fn toggle_during_loading_pauses_instead_of_noop() {
+        let mut a = app();
+        for s in [PlaybackState::Loading, PlaybackState::Buffering] {
+            a.state.playback = Some(s);
+            let cmd = a.handle(AppEvent::TogglePlayPause);
+            assert!(matches!(cmd, Some(AudioCommand::Pause)));
+            assert_eq!(a.state.playback, Some(PlaybackState::Paused));
+        }
+    }
+
+    #[test]
+    fn toggle_from_stopped_with_queue_starts_loading() {
+        let mut a = app();
+        a.state.results = vec![song("a")];
+        a.handle(AppEvent::PlaySelected); // queue [a], Loading
+        a.state.playback = Some(PlaybackState::Stopped); // simulate stop
+        let cmd = a.handle(AppEvent::TogglePlayPause);
+        assert!(cmd.is_none(), "resolve happens in run loop");
+        assert_eq!(a.state.playback, Some(PlaybackState::Loading));
+        // Stopped with empty queue: still nothing.
+        let mut b = app();
+        b.state.playback = Some(PlaybackState::Stopped);
+        assert!(b.handle(AppEvent::TogglePlayPause).is_none());
+        assert_eq!(b.state.playback, Some(PlaybackState::Stopped));
     }
 
     #[test]

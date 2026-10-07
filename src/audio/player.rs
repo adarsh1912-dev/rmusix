@@ -28,7 +28,9 @@ impl IpcClient {
         }
     }
 
-    async fn send(&self, command: serde_json::Value) -> IpcResult {
+    /// Send a command; returns the `request_id` so poll responses can be
+    /// attributed back to the property that was queried.
+    async fn send(&self, command: serde_json::Value) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let msg = serde_json::json!({ "command": command, "request_id": id });
         let mut line = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
@@ -38,11 +40,9 @@ impl IpcClient {
             .await
             .map_err(|e| e.to_string())?;
         w.flush().await.map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(id)
     }
 }
-type IpcResult = Result<(), String>;
-
 /// Build a JSON IPC command (pure, tested against fake server).
 pub fn ipc_command(name: &str, args: Vec<serde_json::Value>) -> serde_json::Value {
     let mut arr = vec![serde_json::Value::String(name.to_string())];
@@ -237,6 +237,12 @@ async fn run_loop(
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_pos: Option<std::time::Duration> = None;
     let mut last_dur: Option<std::time::Duration> = None;
+    // get_property poll responses don't echo the property name, only
+    // request_id — track which id asked for what so a duration reply can
+    // never be mistaken for a position (previously it briefly jumped the
+    // progress bar to the track length, including while paused).
+    let mut pending: std::collections::HashMap<u64, &'static str> =
+        std::collections::HashMap::new();
 
     loop {
         tokio::select! {
@@ -325,7 +331,7 @@ async fn run_loop(
                 }
             } => {
                 if let Some(v) = msg {
-                    handle_ipc_event(v, &events, &mut last_pos, &mut last_dur).await;
+                    handle_ipc_event(v, &events, &mut last_pos, &mut last_dur, &mut pending).await;
                 } else {
                     // server hung up
                     ev_rx = None;
@@ -335,7 +341,13 @@ async fn run_loop(
             _ = poll.tick() => {
                 if let Some(c) = ipc.as_ref() {
                     for prop in ["time-pos", "duration", "pause", "eof-reached"] {
-                        let _ = c.send(ipc_command("get_property", vec![serde_json::json!(prop)])).await;
+                        if let Ok(id) = c.send(ipc_command("get_property", vec![serde_json::json!(prop)])).await {
+                            pending.insert(id, prop);
+                        }
+                    }
+                    // Bound memory when mpv never answers.
+                    if pending.len() > 64 {
+                        pending.clear();
                     }
                 }
             }
@@ -355,6 +367,7 @@ async fn handle_ipc_event(
     events: &mpsc::Sender<AudioEvent>,
     last_pos: &mut Option<std::time::Duration>,
     last_dur: &mut Option<std::time::Duration>,
+    pending: &mut std::collections::HashMap<u64, &'static str>,
 ) {
     // event-style: {"event":"property-change","name":"time-pos","data":12.3}
     if v.get("event").and_then(|e| e.as_str()) == Some("property-change") {
@@ -384,24 +397,44 @@ async fn handle_ipc_event(
             }
             "pause" => {
                 let paused = data.and_then(|d| d.as_bool()).unwrap_or(false);
-                emit(events, AudioEvent::Buffering(false)).await;
-                let _ = paused;
+                emit(events, AudioEvent::Paused(paused)).await;
             }
             _ => {}
         }
         return;
     }
-    // get_property response: {"request_id":..,"data":..,"error":"success"}
-    if v.get("data").is_some() || v.get("request_id").is_some() {
-        // Heuristic: responses arrive in poll order time-pos,duration,pause,eof — ambiguous.
-        // Handle generically: if data is bool true and last request was eof... simplest: treat bool via Finished only when true and value key unknown.
-        // For poll fallback, mpv get_property responses don't echo name; so also poll via observe events primarily.
-        // Still, try: numeric data -> Position update.
-        if let Some(f) = v.get("data").and_then(|d| d.as_f64()) {
-            let d = std::time::Duration::from_secs_f64(f.max(0.0));
-            // Can't distinguish pos vs duration; emit Position (Duration events come via observe).
-            *last_pos = Some(d);
-            emit(events, AudioEvent::Position(d)).await;
+    // get_property response: {"request_id":..,"data":..,"error":"success"}.
+    // Attribute via the pending map; unknown ids are ignored (never guess:
+    // a duration reply misread as position used to jump the bar to the end).
+    if let Some(id) = v.get("request_id").and_then(|id| id.as_u64()) {
+        if let Some(prop) = pending.remove(&id) {
+            match prop {
+                "time-pos" => {
+                    if let Some(f) = v.get("data").and_then(|d| d.as_f64()) {
+                        let d = std::time::Duration::from_secs_f64(f.max(0.0));
+                        *last_pos = Some(d);
+                        emit(events, AudioEvent::Position(d)).await;
+                    }
+                }
+                "duration" => {
+                    if let Some(f) = v.get("data").and_then(|d| d.as_f64()) {
+                        let d = std::time::Duration::from_secs_f64(f.max(0.0));
+                        *last_dur = Some(d);
+                        emit(events, AudioEvent::Duration(Some(d))).await;
+                    } else {
+                        emit(events, AudioEvent::Duration(None)).await;
+                    }
+                }
+                "pause" => {
+                    if let Some(paused) = v.get("data").and_then(|d| d.as_bool()) {
+                        emit(events, AudioEvent::Paused(paused)).await;
+                    }
+                }
+                "eof-reached" if v.get("data").and_then(|d| d.as_bool()).unwrap_or(false) => {
+                    emit(events, AudioEvent::Finished).await;
+                }
+                _ => {}
+            }
         }
         return;
     }
@@ -502,11 +535,13 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let mut lp = None;
         let mut ld = None;
+        let mut pending = std::collections::HashMap::new();
         handle_ipc_event(
             serde_json::json!({"event":"property-change","name":"eof-reached","data":true}),
             &tx,
             &mut lp,
             &mut ld,
+            &mut pending,
         )
         .await;
         assert!(matches!(rx.recv().await.unwrap(), AudioEvent::Finished));
@@ -515,12 +550,76 @@ mod tests {
             &tx,
             &mut lp,
             &mut ld,
+            &mut pending,
         )
         .await;
         match rx.recv().await.unwrap() {
             AudioEvent::Position(d) => assert_eq!(d, StdDuration::from_secs_f64(12.5)),
             e => panic!("unexpected {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pause_property_maps_to_paused_event() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut lp = None;
+        let mut ld = None;
+        let mut pending = std::collections::HashMap::new();
+        handle_ipc_event(
+            serde_json::json!({"event":"property-change","name":"pause","data":true}),
+            &tx,
+            &mut lp,
+            &mut ld,
+            &mut pending,
+        )
+        .await;
+        assert!(matches!(rx.recv().await.unwrap(), AudioEvent::Paused(true)));
+    }
+
+    #[tokio::test]
+    async fn poll_responses_attributed_by_request_id() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut lp = None;
+        let mut ld = None;
+        let mut pending = std::collections::HashMap::new();
+        pending.insert(7, "duration");
+        pending.insert(9, "pause");
+        // Duration reply must NOT become a Position jump.
+        handle_ipc_event(
+            serde_json::json!({"request_id":7,"data":212.0,"error":"success"}),
+            &tx,
+            &mut lp,
+            &mut ld,
+            &mut pending,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            AudioEvent::Duration(Some(_))
+        ));
+        handle_ipc_event(
+            serde_json::json!({"request_id":9,"data":true,"error":"success"}),
+            &tx,
+            &mut lp,
+            &mut ld,
+            &mut pending,
+        )
+        .await;
+        assert!(matches!(rx.recv().await.unwrap(), AudioEvent::Paused(true)));
+        // Unknown ids are ignored, never guessed.
+        handle_ipc_event(
+            serde_json::json!({"request_id":999,"data":5.0,"error":"success"}),
+            &tx,
+            &mut lp,
+            &mut ld,
+            &mut pending,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
