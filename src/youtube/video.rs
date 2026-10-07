@@ -44,19 +44,18 @@ pub async fn fetch_audio_info_with_timeout(
     let id = validate_video_id(video_id)?;
     ensure_binary(ytdlp_path)?;
     let url = format!("https://www.youtube.com/watch?v={id}");
-    let dump = run_with_timeout(ytdlp_path, &["-J", "--no-playlist", &url], timeout).await?;
+    let mut dump_args: Vec<&str> = vec!["-J", "--no-playlist", &url];
+    dump_args.extend_from_slice(crate::youtube::COMMON_FLAGS);
+    let dump = run_with_timeout(ytdlp_path, &dump_args, timeout, "resolve").await?;
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&dump)
         && let Ok(info) = select_audio_stream(&json, quality)
     {
         return Ok(info);
     }
-    // Fallback: direct URL print.
-    let printed = run_with_timeout(
-        ytdlp_path,
-        &["-g", "-f", "bestaudio/best", "--no-playlist", &url],
-        timeout,
-    )
-    .await?;
+    // Fallback: direct URL print (gets its own full RESOLVE_TIMEOUT, not shared).
+    let mut g_args: Vec<&str> = vec!["-g", "-f", "bestaudio/best", "--no-playlist", &url];
+    g_args.extend_from_slice(crate::youtube::COMMON_FLAGS);
+    let printed = run_with_timeout(ytdlp_path, &g_args, timeout, "resolve").await?;
     let stream_url = printed
         .lines()
         .next()
@@ -92,20 +91,9 @@ async fn run_with_timeout(
     bin: &str,
     args: &[&str],
     timeout: Duration,
+    op: &str,
 ) -> Result<String, RmusixError> {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(args);
-    let fut = cmd.output();
-    let output = tokio::time::timeout(timeout, fut)
-        .await
-        .map_err(|_| RmusixError::Network("yt-dlp timed out".to_string()))?
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                RmusixError::Config("yt-dlp not found (pacman -S yt-dlp)".to_string())
-            } else {
-                RmusixError::Network(e.to_string())
-            }
-        })?;
+    let output = crate::youtube::run_ytdlp(bin, args, timeout, op).await?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
