@@ -27,10 +27,32 @@ pub fn duration_from_millis(ms: u64) -> Option<std::time::Duration> {
     }
 }
 
-/// Parse one `--dump-json` ytsearch line into a [`Song`].
-/// Each line is a full video JSON object.
+/// Parse one search-result JSON object into a [`Song`].
+///
+/// Handles both full `--dump-json` lines (numeric `duration`, string
+/// `thumbnail`) and `--flat-playlist --dump-single-json` entries
+/// (`duration` may be a string, thumbnails arrive as `thumbnails: [{url}]`).
 pub fn song_from_json(v: &serde_json::Value) -> Option<Song> {
-    let video_id = v.get("id")?.as_str()?;
+    let video_id = v
+        .get("id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            // Flat entries always carry id, but fall back to watch URL.
+            v.get("url")
+                .and_then(|u| u.as_str())
+                .and_then(|url| {
+                    url.rsplit("v=").next().filter(|id| {
+                        !id.trim().is_empty()
+                            && id.len() <= 16
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    })
+                })
+                .map(str::to_string)
+        })?;
     if video_id.trim().is_empty() {
         return None;
     }
@@ -48,15 +70,26 @@ pub fn song_from_json(v: &serde_json::Value) -> Option<Song> {
         .to_string();
     let duration = v
         .get("duration")
-        .and_then(serde_json::Value::as_f64)
+        .and_then(duration_from_json_value)
         .filter(|d| *d > 0.0)
         .map(std::time::Duration::from_secs_f64);
     let thumbnail_url = v
         .get("thumbnail")
         .and_then(|t| t.as_str())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            // Flat playlist shape: thumbnails: [{url, ...}]. Prefer last
+            // (usually highest res).
+            v.get("thumbnails")
+                .and_then(|t| t.as_array())
+                .iter()
+                .flat_map(|arr| arr.iter().rev())
+                .filter_map(|t| t.get("url").and_then(|u| u.as_str()))
+                .next()
+                .map(str::to_string)
+        });
     Some(Song {
-        video_id: video_id.to_string(),
+        video_id,
         title,
         channel,
         duration,
@@ -64,7 +97,17 @@ pub fn song_from_json(v: &serde_json::Value) -> Option<Song> {
     })
 }
 
+/// Duration may be f64, i64/u64, or a numeric string (flat playlist).
+fn duration_from_json_value(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 /// Parse `--dump-json` JSON-LINES stdout into songs, truncated to `limit`.
+/// Kept for back-compat/tests; live search now uses [`parse_flat_single_json`].
 pub fn parse_search_lines(stdout: &str, limit: usize) -> Vec<Song> {
     let mut out = Vec::new();
     for line in stdout.lines() {
@@ -78,11 +121,49 @@ pub fn parse_search_lines(stdout: &str, limit: usize) -> Vec<Song> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        // Skip playlist-level wrapper objects (flat shape has no entries here).
+        if v.get("entries").is_some() {
+            continue;
+        }
         if let Some(song) = song_from_json(&v) {
             out.push(song);
         }
     }
     out
+}
+
+/// Parse `--flat-playlist --dump-single-json` stdout (one top-level object
+/// with `entries: [...]`) into songs, truncated to `limit`.
+pub fn parse_flat_single_json(stdout: &str, limit: usize) -> Vec<Song> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    // Tolerate trailing garbage: try whole doc, else first JSON object line.
+    let value: Option<serde_json::Value> = serde_json::from_str(trimmed).ok().or_else(|| {
+        trimmed
+            .lines()
+            .next()
+            .and_then(|line| serde_json::from_str(line.trim()).ok())
+    });
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    // Non-flat fallback: single video object (e.g. direct URL search).
+    if value.get("entries").is_none() {
+        return song_from_json(&value).into_iter().take(limit).collect();
+    }
+    value
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(song_from_json)
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Map a failed yt-dlp search invocation to an error.
@@ -139,6 +220,33 @@ mod tests {
         assert_eq!(all[0].duration, Some(std::time::Duration::from_secs(212)));
         let one = parse_search_lines(&stdout, 1);
         assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn parses_flat_single_json_with_string_duration_and_thumbnails_array() {
+        let stdout = r#"{"id":"ytsearch","entries":[
+            {"id":"4NRXx6U8ABQ","title":"Blinding Lights","uploader":"The Weeknd","duration":"263","thumbnails":[{"url":"http://img/low.jpg"},{"url":"http://img/high.jpg"}]},
+            {"id":"fHI8X4OXluQ","title":"Audio","channel":"The Weeknd","duration":204.0,"thumbnail":"http://img/a.jpg"},
+            {"id":"","title":"blank","duration":10}
+        ]}"#;
+        let songs = parse_flat_single_json(stdout, 10);
+        assert_eq!(songs.len(), 2);
+        assert_eq!(songs[0].video_id, "4NRXx6U8ABQ");
+        assert_eq!(songs[0].duration, Some(std::time::Duration::from_secs(263)));
+        assert_eq!(
+            songs[0].thumbnail_url.as_deref(),
+            Some("http://img/high.jpg")
+        );
+        assert_eq!(songs[1].duration, Some(std::time::Duration::from_secs(204)));
+        let one = parse_flat_single_json(stdout, 1);
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn flat_parser_rejects_empty_and_invalid() {
+        assert!(parse_flat_single_json("", 10).is_empty());
+        assert!(parse_flat_single_json("not json", 10).is_empty());
+        assert!(parse_flat_single_json(r#"{"entries":[]}"#, 10).is_empty());
     }
 
     #[test]

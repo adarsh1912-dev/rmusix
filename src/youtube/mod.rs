@@ -97,12 +97,20 @@ impl YouTubeClient for YtDlpClient {
         }
         ensure_binary(&self.bin)?;
         let spec = format!("ytsearch{limit}:{normalized}");
-        let mut args: Vec<&str> = vec![&spec, "--dump-json", "--no-playlist"];
+        // Flat playlist = single list request (~2s for 10). Full --dump-json
+        // fetches every video's formats (~25s). Full metadata arrives on
+        // Enter via resolve (-J) anyway, so list speed wins here.
+        let mut args: Vec<&str> = vec![
+            &spec,
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-playlist",
+        ];
         args.extend_from_slice(COMMON_FLAGS);
         let output = run_ytdlp(&self.bin, &args, self.search_timeout, "search").await?;
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            return Ok(search::parse_search_lines(&stdout, limit));
+            return Ok(search::parse_flat_single_json(&stdout, limit));
         }
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(search::map_search_error(output.status.code(), &stderr))
