@@ -50,7 +50,7 @@ pub fn song_from_json(v: &serde_json::Value) -> Option<Song> {
         .get("duration")
         .and_then(serde_json::Value::as_f64)
         .filter(|d| *d > 0.0)
-        .map(|d| std::time::Duration::from_secs_f64(d));
+        .map(std::time::Duration::from_secs_f64);
     let thumbnail_url = v
         .get("thumbnail")
         .and_then(|t| t.as_str())

@@ -157,9 +157,11 @@ mod tests {
         // Startup check (Glue): nonexistent binaries must surface as
         // `Config` errors with install hints so `main` can exit 2 before
         // entering the TUI.
-        let mut cfg = AppConfig::default();
-        cfg.ytdlp_path = "/nonexistent/yt-dlp-xyz".into();
-        cfg.mpv_path = "/nonexistent-mpv-xyz".into();
+        let cfg = AppConfig {
+            ytdlp_path: "/nonexistent/yt-dlp-xyz".into(),
+            mpv_path: "/nonexistent-mpv-xyz".into(),
+            ..AppConfig::default()
+        };
         let e = cfg.resolve_ytdlp().expect_err("missing yt-dlp must fail");
         assert!(e.to_string().contains("yt-dlp not found"), "got {e}");
         let e = cfg.resolve_mpv().expect_err("missing mpv must fail");

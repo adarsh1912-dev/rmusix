@@ -89,7 +89,7 @@ impl YouTubeClient for YtDlpClient {
         let output = tokio::time::timeout(self.timeout, cmd.output())
             .await
             .map_err(|_| RmusixError::Network("yt-dlp timed out".to_string()))?
-            .map_err(|e| map_spawn_error(e))?;
+            .map_err(map_spawn_error)?;
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Ok(search::parse_search_lines(&stdout, limit));

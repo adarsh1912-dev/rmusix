@@ -7,11 +7,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install ALSA deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Install mpv + yt-dlp
+        run: sudo apt-get update && sudo apt-get install -y mpv yt-dlp
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Process-spawn gate: `Command` (std/tokio) may only appear in
+      # src/youtube + src/audio (subprocess backends). Fails the job otherwise.
+      - name: subprocess gate (Command only in src/youtube + src/audio)
+        run: |
+          if rg -n 'process::Command' src/ | grep -v '^src/youtube/' | grep -v '^src/audio/' | grep -q .; then
+            echo 'ERROR: Command usage outside src/youtube + src/audio:' >&2
+            rg -n 'process::Command' src/ | grep -v '^src/youtube/' | grep -v '^src/audio/' >&2
+            exit 1
+          fi

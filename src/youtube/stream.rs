@@ -27,10 +27,10 @@ pub fn select_audio_stream(
 
 fn bitrate_of(f: &serde_json::Value) -> f64 {
     for key in ["abr", "tbr"] {
-        if let Some(n) = f.get(key).and_then(serde_json::Value::as_f64) {
-            if n > 0.0 {
-                return n;
-            }
+        if let Some(n) = f.get(key).and_then(serde_json::Value::as_f64)
+            && n > 0.0
+        {
+            return n;
         }
         // yt-dlp sometimes emits integers; as_f64 already covers those.
     }

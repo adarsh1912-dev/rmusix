@@ -45,10 +45,10 @@ pub async fn fetch_audio_info_with_timeout(
     ensure_binary(ytdlp_path)?;
     let url = format!("https://www.youtube.com/watch?v={id}");
     let dump = run_with_timeout(ytdlp_path, &["-J", "--no-playlist", &url], timeout).await?;
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&dump) {
-        if let Ok(info) = select_audio_stream(&json, quality) {
-            return Ok(info);
-        }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&dump)
+        && let Ok(info) = select_audio_stream(&json, quality)
+    {
+        return Ok(info);
     }
     // Fallback: direct URL print.
     let printed = run_with_timeout(

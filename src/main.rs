@@ -24,22 +24,16 @@ fn remove_socket(sock: &PathBuf) {
     let _ = std::fs::remove_file(sock);
 }
 
-/// Best-effort kill of the mpv child tied to `sock`.
+/// Best-effort cleanup of the mpv socket tied to `sock`.
 ///
-/// The child is spawned as `mpv --input-ipc-server=<sock> ...`, so
-/// `pkill -f <sock>` targets exactly our instance. The graceful `q` /
-/// Ctrl-C-key path in `App::run` already sends `Stop`, drops the engine
-/// (`kill_on_drop(true)`) and removes the socket; this is only a fallback
-/// for the async-signal path where destructors are skipped via `exit()`.
+/// Glue note: process spawning (`Command`) is allowed only in
+/// `src/youtube` + `src/audio`. The mpv child is owned by `MpvEngine`
+/// (`kill_on_drop(true)`) and the graceful `q` path sends `Stop`, so the
+/// async-signal fallback here only removes the socket file and restores
+/// the terminal — no `pkill` subprocess.
 fn kill_mpv_for_socket(sock: &PathBuf) {
-    let needle = sock.display().to_string();
-    // `pkill` may be missing; ignore all failures (graceful path covers it).
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", &needle])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Engine owns the child; just drop the stale socket file.
+    remove_socket(sock);
 }
 
 fn install_panic_hook(sock: PathBuf) {
