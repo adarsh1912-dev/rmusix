@@ -4,8 +4,7 @@
 //! Ignored by default. Run manually with:
 //! `RMUSIX_LIVE=1 cargo test --test youtube_live -- --ignored --nocapture`
 //!
-//! Requires network + an audio device; asserts nothing about binaries
-//! (no yt-dlp/ffmpeg/mpv are used — pure-Rust scraping + rodio).
+//! Requires network + yt-dlp/mpv binaries (subprocess backend).
 
 use rmusix::models::AudioQuality;
 use rmusix::youtube::{RustyYtdlClient, YouTubeClient};

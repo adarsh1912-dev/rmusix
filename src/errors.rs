@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 /// Foundation error type. No `unwrap` / `expect` in `src/` — propagate via `Result<T, RmusixError>`.
+/// Binary hints: "yt-dlp not found (pacman -S yt-dlp)", "mpv not found (pacman -S mpv)".
 #[derive(Error, Debug)]
 pub enum RmusixError {
     #[error("network error: {0}")]

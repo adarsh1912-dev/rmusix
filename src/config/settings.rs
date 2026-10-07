@@ -12,6 +12,20 @@ pub struct AppConfig {
     pub search_limit: usize,
     /// Preferred audio quality.
     pub quality: AudioQuality,
+    /// Path to the yt-dlp binary.
+    #[serde(default = "default_ytdlp_path")]
+    pub ytdlp_path: String,
+    /// Path to the mpv binary.
+    #[serde(default = "default_mpv_path")]
+    pub mpv_path: String,
+}
+
+fn default_ytdlp_path() -> String {
+    "yt-dlp".to_string()
+}
+
+fn default_mpv_path() -> String {
+    "mpv".to_string()
 }
 
 impl Default for AppConfig {
@@ -20,6 +34,8 @@ impl Default for AppConfig {
             volume: 0.5,
             search_limit: 10,
             quality: AudioQuality::Medium,
+            ytdlp_path: default_ytdlp_path(),
+            mpv_path: default_mpv_path(),
         }
     }
 }
@@ -33,15 +49,44 @@ impl AppConfig {
     }
 
     /// Load config from disk, falling back to [`AppConfig::default`] when missing.
+    /// `RMUSIX_YTDLP` / `RMUSIX_MPV` env vars override file values.
     pub fn load() -> Result<Self, RmusixError> {
         let path = Self::config_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| RmusixError::Config(format!("failed to read {}: {e}", path.display())))?;
-        let cfg: Self = toml::from_str(&contents)?;
+        let mut cfg = if !path.exists() {
+            Self::default()
+        } else {
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                RmusixError::Config(format!("failed to read {}: {e}", path.display()))
+            })?;
+            toml::from_str(&contents)?
+        };
+        Self::apply_env_overrides(&mut cfg);
         Ok(cfg)
+    }
+
+    fn apply_env_overrides(cfg: &mut Self) {
+        if let Ok(v) = std::env::var("RMUSIX_YTDLP")
+            && !v.trim().is_empty()
+        {
+            cfg.ytdlp_path = v;
+        }
+        if let Ok(v) = std::env::var("RMUSIX_MPV")
+            && !v.trim().is_empty()
+        {
+            cfg.mpv_path = v;
+        }
+    }
+
+    /// Resolve `yt-dlp` via [`which::which`], returning a config error with install hint.
+    pub fn resolve_ytdlp(&self) -> Result<std::path::PathBuf, RmusixError> {
+        which::which(&self.ytdlp_path)
+            .map_err(|_| RmusixError::Config("yt-dlp not found (pacman -S yt-dlp)".to_string()))
+    }
+
+    /// Resolve `mpv` via [`which::which`], returning a config error with install hint.
+    pub fn resolve_mpv(&self) -> Result<std::path::PathBuf, RmusixError> {
+        which::which(&self.mpv_path)
+            .map_err(|_| RmusixError::Config("mpv not found (pacman -S mpv)".to_string()))
     }
 
     /// Save config to disk, creating parent directories as needed.
@@ -81,5 +126,29 @@ mod tests {
         assert!(s.contains("quality"));
         let back: AppConfig = toml::from_str(&s).expect("deserialize default config");
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn defaults_include_binary_paths() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.ytdlp_path, "yt-dlp");
+        assert_eq!(cfg.mpv_path, "mpv");
+    }
+
+    #[test]
+    fn env_overrides_paths() {
+        // SAFETY: test-only, single-threaded mutation of process env.
+        unsafe {
+            std::env::set_var("RMUSIX_YTDLP", "/custom/yt-dlp");
+            std::env::set_var("RMUSIX_MPV", "/custom/mpv");
+        }
+        let mut cfg = AppConfig::default();
+        AppConfig::apply_env_overrides(&mut cfg);
+        assert_eq!(cfg.ytdlp_path, "/custom/yt-dlp");
+        assert_eq!(cfg.mpv_path, "/custom/mpv");
+        unsafe {
+            std::env::remove_var("RMUSIX_YTDLP");
+            std::env::remove_var("RMUSIX_MPV");
+        }
     }
 }

@@ -7,6 +7,7 @@ fn toml_roundtrip() {
         volume: 0.7,
         search_limit: 25,
         quality: AudioQuality::High,
+        ..AppConfig::default()
     };
     let s = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(s.contains("volume"));

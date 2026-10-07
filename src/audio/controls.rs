@@ -64,9 +64,8 @@ impl VolumeControl {
 
 /// Compute a forward seek target, saturating at `total` when known.
 ///
-/// `rodio::Sink::try_seek` support depends on the decoder/source; when the
-/// underlying source does not support seeking this pure computation is still
-/// used for UI position display (documented fallback: position display only).
+/// mpv IPC seeking lands in Agent 2; this pure computation is used for
+/// UI position display.
 pub fn seek_forward_target(
     current: Duration,
     delta: Duration,
@@ -81,9 +80,7 @@ pub fn seek_forward_target(
 
 /// Compute a backward seek target, saturating at zero.
 ///
-/// Same fallback note as [`seek_forward_target`]: if `try_seek` is
-/// unsupported the player keeps playing and only the displayed position
-/// is adjusted.
+/// Same fallback note as [`seek_forward_target`].
 pub fn seek_backward_target(current: Duration, delta: Duration) -> Duration {
     current.checked_sub(delta).unwrap_or(Duration::ZERO)
 }

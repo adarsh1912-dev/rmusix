@@ -1,4 +1,4 @@
-//! Audio engine (rodio + symphonia, scrape-only, no subprocesses).
+//! yt-dlp/mpv subprocess backend — Command allowed ONLY here.
 
 use crate::models::AudioStreamInfo;
 use std::time::Duration;
@@ -6,7 +6,6 @@ use std::time::Duration;
 /// Commands sent to the audio task.
 #[derive(Debug, Clone)]
 pub enum AudioCommand {
-    /// Play a resolved (scraped) stream.
     Play(AudioStreamInfo),
     Pause,
     Resume,
