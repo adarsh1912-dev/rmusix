@@ -29,4 +29,4 @@ pub enum AudioEvent {
 pub mod controls;
 pub mod player;
 
-pub use player::AudioEngine;
+pub use player::{AudioEngine, EventRx, MpvEngine};

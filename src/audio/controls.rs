@@ -28,6 +28,11 @@ impl VolumeControl {
         v.clamp(0.0, 1.0)
     }
 
+    /// mpv IPC volume scale (0-100), clamped.
+    pub fn mpv_volume(v: f32) -> i64 {
+        (Self::clamp(v) * 100.0).round() as i64
+    }
+
     pub fn set(&mut self, v: f32) {
         let v = Self::clamp(v);
         self.volume = v;
@@ -41,8 +46,17 @@ impl VolumeControl {
         if self.muted { 0.0 } else { self.volume }
     }
 
+    /// Effective mpv volume for current state (0 when muted).
+    pub fn effective_mpv_volume(&self) -> i64 {
+        Self::mpv_volume(self.volume())
+    }
+
     pub fn stored_volume(&self) -> f32 {
         self.volume
+    }
+
+    pub fn last_unmuted(&self) -> f32 {
+        self.last_unmuted
     }
 
     pub fn is_muted(&self) -> bool {
@@ -60,12 +74,15 @@ impl VolumeControl {
             self.muted = true;
         }
     }
+
+    /// Volume to send to mpv after a toggle (pure helper).
+    pub fn toggle_mute_mpv(&mut self) -> i64 {
+        self.toggle_mute();
+        self.effective_mpv_volume()
+    }
 }
 
 /// Compute a forward seek target, saturating at `total` when known.
-///
-/// mpv IPC seeking lands in Agent 2; this pure computation is used for
-/// UI position display.
 pub fn seek_forward_target(
     current: Duration,
     delta: Duration,
@@ -79,8 +96,6 @@ pub fn seek_forward_target(
 }
 
 /// Compute a backward seek target, saturating at zero.
-///
-/// Same fallback note as [`seek_forward_target`].
 pub fn seek_backward_target(current: Duration, delta: Duration) -> Duration {
     current.checked_sub(delta).unwrap_or(Duration::ZERO)
 }
@@ -98,11 +113,20 @@ mod tests {
     }
 
     #[test]
+    fn mpv_volume_scale() {
+        assert_eq!(VolumeControl::mpv_volume(0.0), 0);
+        assert_eq!(VolumeControl::mpv_volume(0.5), 50);
+        assert_eq!(VolumeControl::mpv_volume(2.0), 100);
+        assert_eq!(VolumeControl::mpv_volume(-1.0), 0);
+    }
+
+    #[test]
     fn mute_stores_last_volume() {
         let mut v = VolumeControl::new(0.7);
         v.toggle_mute();
         assert!(v.is_muted());
         assert_eq!(v.volume(), 0.0);
+        assert_eq!(v.effective_mpv_volume(), 0);
         v.toggle_mute();
         assert!(!v.is_muted());
         assert!((v.volume() - 0.7).abs() < f32::EPSILON);
