@@ -2,6 +2,9 @@
 name = "rmusix"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal YouTube music player in Rust (yt-dlp + mpv TUI)"
+license = "MIT"
+repository = "https://github.com/adarsh1912-dev/rmusix"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread","macros","sync","time","signal","process","io-util"] }
